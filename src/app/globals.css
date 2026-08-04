@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+}
+
+html,
+body {
+  background: #07090d;
+  color: #ededed;
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  /* A cat resting a paw on the glass should never bounce, zoom, or select. */
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+canvas {
+  touch-action: none;
+  display: block;
+}
