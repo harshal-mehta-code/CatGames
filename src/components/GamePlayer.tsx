@@ -1,14 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import type { CatProfile, GameEvent, GameModule, PawEvent } from "@/lib/types";
-import { initAudio, setVolume } from "@/lib/audio";
+import type { CatProfile, GameEvent, PawEvent } from "@/lib/types";
+import type { Round } from "@/lib/shuffle";
+import { REST_SECONDS } from "@/lib/shuffle";
+import { initAudio, setVolume, chirp } from "@/lib/audio";
 import { updateSkill, loadProfiles, saveProfiles } from "@/lib/profiles";
+import { recordRound } from "@/lib/affinity";
 
 /** Default hunt length. Cats hunt in short bursts; an endless session is how
  *  you get an over-aroused, frustrated cat rather than a satisfied one. */
-const SESSION_SECONDS = 6 * 60;
+export const SESSION_SECONDS = 6 * 60;
 
 interface Stats {
   hits: number;
@@ -16,26 +19,41 @@ interface Stats {
   nearMisses: number;
 }
 
+const ZERO: Stats = { hits: 0, strikes: 0, nearMisses: 0 };
+
 export default function GamePlayer({
-  module: mod,
-  profile: initialProfile,
+  plan,
+  profile,
+  shuffled = false,
 }: {
-  module: GameModule;
+  /** One round for a single game, several for a shuffle. */
+  plan: Round[];
   profile: CatProfile;
+  shuffled?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [started, setStarted] = useState(false);
   const [done, setDone] = useState(false);
-  const [remaining, setRemaining] = useState(SESSION_SECONDS);
-  const statsRef = useRef<Stats>({ hits: 0, strikes: 0, nearMisses: 0 });
-  const [stats, setStats] = useState<Stats>({
-    hits: 0,
-    strikes: 0,
-    nearMisses: 0,
-  });
-  const profileRef = useRef(initialProfile);
-  const profile = initialProfile;
+  const [round, setRound] = useState(0);
+  /** Dark beat between rounds. Also covers the new game's first frame. */
+  const [resting, setResting] = useState(false);
+
+  const total = useMemo(
+    () => plan.reduce((s, r) => s + r.seconds, 0),
+    [plan],
+  );
+  const [remaining, setRemaining] = useState(total);
+  const statsRef = useRef<Stats>({ ...ZERO });
+  const [stats, setStats] = useState<Stats>(ZERO);
+  const profileRef = useRef(profile);
+  /** Play seconds completed in rounds already finished. */
+  const bankedRef = useRef(0);
+  /** Cumulative strikes at the current round's start, for affinity scoring. */
+  const roundBaseRef = useRef(0);
+
+  const current = plan[Math.min(round, plan.length - 1)];
+  const last = round >= plan.length - 1;
 
   /** Fold this session's hit rate back into the cat's stored difficulty. */
   const finish = useCallback(() => {
@@ -48,12 +66,16 @@ export default function GamePlayer({
   }, []);
 
   useEffect(() => {
-    if (!started || done) return;
+    if (!started || done || resting) return;
     const canvas = canvasRef.current;
     const wrap = wrapRef.current;
     if (!canvas || !wrap) return;
     const g = canvas.getContext("2d", { alpha: false });
     if (!g) return;
+
+    const mod = current.game;
+    const limit = current.seconds;
+    roundBaseRef.current = statsRef.current.strikes;
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
     let w = wrap.clientWidth;
@@ -92,15 +114,12 @@ export default function GamePlayer({
     ro.observe(wrap);
 
     // --- Input ------------------------------------------------------------
-    const last = new Map<number, { x: number; y: number; t: number }>();
-    const toPaw = (
-      ev: PointerEvent,
-      phase: PawEvent["phase"],
-    ): PawEvent => {
+    const seen = new Map<number, { x: number; y: number; t: number }>();
+    const toPaw = (ev: PointerEvent, phase: PawEvent["phase"]): PawEvent => {
       const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left;
       const y = ev.clientY - rect.top;
-      const prev = last.get(ev.pointerId);
+      const prev = seen.get(ev.pointerId);
       const now = performance.now();
       let vx = 0;
       let vy = 0;
@@ -109,8 +128,8 @@ export default function GamePlayer({
         vx = (x - prev.x) / dt;
         vy = (y - prev.y) / dt;
       }
-      if (phase === "up") last.delete(ev.pointerId);
-      else last.set(ev.pointerId, { x, y, t: now });
+      if (phase === "up") seen.delete(ev.pointerId);
+      else seen.set(ev.pointerId, { x, y, t: now });
       return {
         id: ev.pointerId,
         x,
@@ -156,13 +175,23 @@ export default function GamePlayer({
       acc += dt;
       if (acc >= 1) {
         acc -= 1;
-        setRemaining(Math.max(0, SESSION_SECONDS - Math.floor(elapsed)));
+        setRemaining(
+          Math.max(0, total - Math.floor(bankedRef.current + elapsed)),
+        );
         setStats({ ...statsRef.current });
       }
-      // The hunt ends itself. Cats hunt in short bursts, and an app that never
-      // stops is the one that leaves them wound up instead of satisfied.
-      if (elapsed >= SESSION_SECONDS) {
-        finish();
+      // The round ends itself. Cats hunt in short bursts, and an app that
+      // never stops is the one that leaves them wound up instead of satisfied.
+      if (elapsed >= limit) {
+        bankedRef.current += limit;
+        recordRound(
+          profileRef.current.id,
+          mod.id,
+          statsRef.current.strikes - roundBaseRef.current,
+          limit,
+        );
+        if (last) finish();
+        else setResting(true);
         return;
       }
       game.update(dt, now / 1000);
@@ -181,7 +210,22 @@ export default function GamePlayer({
       canvas.removeEventListener("pointerleave", up);
       game.dispose?.();
     };
-  }, [started, done, mod, finish]);
+  }, [started, done, resting, current, last, total, finish]);
+
+  /**
+   * The rest beat. The screen goes dark and quiet for a few seconds, then the
+   * next game opens with a single chirp — a fresh stimulus to re-orient on,
+   * rather than one game dissolving into another while the cat is mid-swat.
+   */
+  useEffect(() => {
+    if (!resting) return;
+    const id = setTimeout(() => {
+      setRound((r) => r + 1);
+      setResting(false);
+      chirp();
+    }, REST_SECONDS * 1000);
+    return () => clearTimeout(id);
+  }, [resting]);
 
   // Keep the iPad awake during a hunt.
   useEffect(() => {
@@ -207,9 +251,12 @@ export default function GamePlayer({
     } catch {
       /* iOS Safari doesn't allow this outside of PWA mode; not fatal */
     }
-    statsRef.current = { hits: 0, strikes: 0, nearMisses: 0 };
-    setStats({ hits: 0, strikes: 0, nearMisses: 0 });
-    setRemaining(SESSION_SECONDS);
+    statsRef.current = { ...ZERO };
+    bankedRef.current = 0;
+    setStats(ZERO);
+    setRemaining(total);
+    setRound(0);
+    setResting(false);
     setDone(false);
     setStarted(true);
   };
@@ -217,12 +264,13 @@ export default function GamePlayer({
   const accuracy = stats.strikes
     ? Math.round((stats.hits / stats.strikes) * 100)
     : 0;
+  const mins = Math.round(total / 60);
 
   return (
     <div
       ref={wrapRef}
       className="relative h-dvh w-full touch-none overscroll-none select-none"
-      style={{ background: mod.backdrop }}
+      style={{ background: current.game.backdrop }}
     >
       <canvas
         ref={canvasRef}
@@ -230,10 +278,17 @@ export default function GamePlayer({
       />
 
       {started && !done && (
-        <HoldToExit
-          onExit={finish}
-          remaining={remaining}
-        />
+        <HoldToExit onExit={finish} remaining={remaining} />
+      )}
+
+      {/* Rest beat. Deliberately near-black and empty: the point is that
+          there is nothing to chase for a moment. */}
+      {started && !done && resting && (
+        <div className="absolute inset-0 grid place-items-center bg-black transition-opacity duration-500">
+          <p className="text-xs uppercase tracking-[0.35em] text-white/15">
+            {plan[Math.min(round + 1, plan.length - 1)].game.title}
+          </p>
+        </div>
       )}
 
       {(!started || done) && (
@@ -256,20 +311,42 @@ export default function GamePlayer({
                     cat apps skip, and it's the part that actually leaves the
                     cat settled instead of wound up. */}
                 <p className="mt-6 text-balance text-white/70">
-                  Now go give {profile.name} a treat — finishing the
-                  hunt with a meal is what turns it into a satisfying kill
-                  rather than an unresolved chase.
+                  Now go give {profile.name} a treat — finishing the hunt with a
+                  meal is what turns it into a satisfying kill rather than an
+                  unresolved chase.
                 </p>
               </>
             ) : (
               <>
                 <h1 className="text-4xl font-semibold text-white">
-                  {mod.title}
+                  {shuffled ? "The Shuffle" : current.game.title}
                 </h1>
-                <p className="mt-3 text-balance text-white/60">{mod.tagline}</p>
+                <p className="mt-3 text-balance text-white/60">
+                  {shuffled
+                    ? "A hunt in rounds. The game changes before it gets predictable, with a dark beat of rest in between."
+                    : current.game.tagline}
+                </p>
+                {shuffled && (
+                  <ol className="mt-6 flex flex-col items-center gap-1.5 text-sm text-white/45">
+                    {plan.map((r, i) => (
+                      <li key={i} className="flex items-center gap-2">
+                        <span
+                          className="h-1.5 w-1.5 rounded-full"
+                          style={{ background: r.game.accent }}
+                        />
+                        {r.game.title}
+                        <span className="text-white/25">
+                          {Math.round(r.seconds / 60) >= 1
+                            ? `${Math.round(r.seconds / 60)} min`
+                            : `${r.seconds}s`}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
                 <p className="mt-6 text-sm text-white/40">
-                  Playing as {profile.name} ·{" "}
-                  {profile.style} · 6 minute hunt
+                  Playing as {profile.name} · {profile.style} · {mins} minute
+                  hunt
                 </p>
               </>
             )}
@@ -277,7 +354,7 @@ export default function GamePlayer({
               <button
                 onClick={begin}
                 className="rounded-full px-8 py-4 text-lg font-medium text-black transition active:scale-95"
-                style={{ background: mod.accent }}
+                style={{ background: current.game.accent }}
               >
                 {done ? "Hunt again" : "Start the hunt"}
               </button>

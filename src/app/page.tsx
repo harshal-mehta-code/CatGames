@@ -49,9 +49,29 @@ export default function Home() {
           })}
         </div>
 
+        {/* The shuffle leads, because rotation is what keeps any of this
+            working past the second week. A single game played daily stops
+            being prey once the cat can predict it. */}
+        <Link
+          href="/play/shuffle"
+          className="group relative mt-10 block overflow-hidden rounded-3xl border border-white/15 bg-white/[0.04] p-7 transition hover:border-white/30 hover:bg-white/[0.07]"
+        >
+          <div className="absolute -right-10 -top-20 h-56 w-56 rounded-full bg-[conic-gradient(from_180deg,#7dd3fc,#fbbf24,#4ade80,#7dd3fc)] opacity-20 blur-3xl transition group-hover:opacity-30" />
+          <p className="text-xs uppercase tracking-[0.35em] text-white/35">
+            Recommended
+          </p>
+          <h3 className="mt-2 text-3xl font-semibold">The Shuffle</h3>
+          <p className="mt-2 max-w-md text-sm leading-relaxed text-white/50">
+            One hunt, several rounds. The game switches before{" "}
+            {current ? current.name : "your cat"} can settle into a pattern,
+            with a dark beat of rest between each — and it learns which games
+            actually get {current ? current.name : "them"} swatting.
+          </p>
+        </Link>
+
         <section className="mt-12">
           <h2 className="text-xs uppercase tracking-[0.35em] text-white/35">
-            Games
+            Or pick one
           </h2>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             {GAMES.map((g) => {

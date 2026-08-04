@@ -4,7 +4,9 @@ import { GAMES } from "@/lib/registry";
 export const dynamicParams = false;
 
 export function generateStaticParams() {
-  return GAMES.map((g) => ({ id: g.id }));
+  // "shuffle" isn't a module — it's the rotation layer, which builds its plan
+  // client-side from the active cat's history.
+  return [...GAMES.map((g) => ({ id: g.id })), { id: "shuffle" }];
 }
 
 export default async function PlayPage({ params }: PageProps<"/play/[id]">) {
