@@ -47,6 +47,13 @@ class Critter {
   /** Lateral whip phase, so the tail flicks rather than just trailing. */
   whip = rand(TAU);
   stun = 0;
+  caught = false;
+  revealT = 0;
+  /** Appearance genes — every animal revealed is a different one. */
+  hue: number;
+  earScale: number;
+  plump: number;
+  snout: number;
 
   constructor(x: number, y: number, big = false) {
     this.x = x;
@@ -54,6 +61,10 @@ class Critter {
     this.size = rand(62, 46) * (big ? 1.45 : 1);
     this.lift = rand(26, 19) * (big ? 1.3 : 1);
     this.speed = rand(150, 95) * (big ? 0.82 : 1);
+    this.hue = chance(0.5) ? rand(45, 28) : rand(228, 200);
+    this.earScale = rand(1.3, 0.65);
+    this.plump = rand(1.15, 0.85);
+    this.snout = rand(1.25, 0.8);
     this.tailLen = rand(9, 6);
     for (let i = 0; i < this.tailLen; i++) this.tail.push({ x, y });
   }
@@ -70,13 +81,58 @@ class Critter {
     this.v = this.speed * 2.9;
   }
 
-  hit(fromX: number, fromY: number) {
+  /** A tail grab. It squirms loose and bolts — a real but partial win. */
+  graze(fromX: number, fromY: number) {
     this.state = "stunned";
     this.stateT = 0;
     this.stun = 1;
     this.v = 0;
     this.a = Math.atan2(this.y - fromY, this.x - fromX);
     this.targetA = this.a;
+  }
+
+  /**
+   * Pinned through the sheet. This is a terminal capture: the hunt resolves,
+   * the sheet slides off, and the cat finally sees what it has been chasing.
+   * Without this the game is an unwinnable chase — the exact thing that makes
+   * laser pointers bad for cats.
+   */
+  pin(fromX: number, fromY: number) {
+    if (this.caught) return false;
+    this.caught = true;
+    this.revealT = 0;
+    this.v = 0;
+    this.targetV = 0;
+    this.a = Math.atan2(this.y - fromY, this.x - fromX);
+    this.targetA = this.a;
+    return true;
+  }
+
+  /** Cloth lift. Bunches up as it's pinned, then drops away as it's revealed. */
+  get domeAmp() {
+    if (!this.caught) return this.lift * (1 + this.stun * 0.7);
+    if (this.revealT < 0.35) {
+      return this.lift * (1 + (this.revealT / 0.35) * 0.8);
+    }
+    return this.lift * 1.8 * clamp(1 - (this.revealT - 0.35) / 0.3, 0, 1);
+  }
+
+  /** Opacity of the revealed animal sitting on top of the sheet. */
+  get revealAlpha() {
+    if (!this.caught) return 0;
+    const inn = clamp((this.revealT - 0.28) / 0.22, 0, 1);
+    const out = clamp(1 - (this.revealT - 2.4) / 0.7, 0, 1);
+    return inn * out;
+  }
+
+  /** How hard it's still fighting — drives the squirm and the tail thrash. */
+  get struggle() {
+    if (!this.caught) return 0;
+    return this.revealT < 0.5 ? 1 : clamp(1 - (this.revealT - 0.5) / 1.2, 0, 1);
+  }
+
+  get dead() {
+    return this.caught && this.revealT > 3.1;
   }
 
   update(
@@ -88,6 +144,14 @@ class Critter {
   ) {
     this.stateT += dt;
     this.stun = damp(this.stun, 0, 0.2, dt);
+
+    // Once pinned it stops hunting and plays out the capture.
+    if (this.caught) {
+      this.revealT += dt;
+      this.whip += dt * 14 * this.struggle;
+      this.updateTail(dt);
+      return;
+    }
 
     for (const t of threats) {
       const d = Math.hypot(t.x - this.x, t.y - this.y);
@@ -203,7 +267,12 @@ class Critter {
       // Lateral whip, applied perpendicular to the segment so the tail flicks
       // instead of merely trailing.
       const t = i / this.tail.length;
-      const amp = (this.state === "stunned" ? 22 : 5 + this.v * 0.045) * t;
+      const amp =
+        (this.caught
+          ? 34 * this.struggle
+          : this.state === "stunned"
+            ? 22
+            : 5 + this.v * 0.045) * t;
       const wob = Math.sin(this.whip - i * 0.75) * amp * dt * 12;
       let dir = Math.atan2(uy * seg + ux * wob, ux * seg - uy * wob);
       let bend = ((dir - prevDir + Math.PI) % TAU) - Math.PI;
@@ -249,6 +318,7 @@ class UnderSheet implements GameInstance {
   private pointers = new Map<number, { x: number; y: number }>();
   private presses: PressPoint[] = [];
   private idleT = 0;
+  private respawnT = 0;
   private rustleT = 0;
   private timeScale = 1;
   private streak = 0;
@@ -342,6 +412,7 @@ class UnderSheet implements GameInstance {
     let viaTail = false;
     let bestD = Infinity;
     for (const c of this.critters) {
+      if (c.caught) continue;
       const dBody = Math.hypot(c.x - e.x, c.y - e.y);
       const dTail = c.tailDistance(e.x, e.y);
       // Pinning the body is the real catch; the tail is a wider, easier target
@@ -367,6 +438,7 @@ class UnderSheet implements GameInstance {
     this.host.report({ type: "miss" });
     let spooked = false;
     for (const c of this.critters) {
+      if (c.caught) continue;
       if (Math.hypot(c.x - e.x, c.y - e.y) < reach * 3.4) {
         c.spook(e.x, e.y);
         spooked = true;
@@ -393,14 +465,26 @@ class UnderSheet implements GameInstance {
     y: number,
     pan: number,
   ) {
-    c.hit(x, y);
+    if (viaTail) {
+      // Caught it by the tail: it squirms loose and bolts. A partial win, and
+      // the cat still visibly made something happen.
+      c.graze(x, y);
+      this.host.report({ type: "hit", value: 1 });
+      sfx.squeak(pan, true);
+      sfx.rustle(pan, 1);
+      this.cloth.poke(c.x, c.y, 1100, c.size * 2.2);
+      this.timeScale = 0.55;
+      return;
+    }
+    if (!c.pin(x, y)) return;
     this.streak++;
-    this.host.report({ type: "hit", value: viaTail ? 1 : 2 });
-    sfx.squeak(pan, true);
+    this.host.report({ type: "hit", value: 3 });
+    sfx.squeak(pan, false);
     sfx.rustle(pan, 1);
-    // The whole sheet jumps.
+    sfx.thump(pan, 1);
+    // The whole sheet jumps, then slides off it.
     this.cloth.poke(c.x, c.y, 1600, c.size * 2.6);
-    this.timeScale = viaTail ? 0.55 : 0.35;
+    this.timeScale = 0.3;
   }
 
   update(dt: number) {
@@ -437,6 +521,7 @@ class UnderSheet implements GameInstance {
       let fastest: Critter | null = null;
       let bv = 0;
       for (const c of this.critters) {
+        if (c.caught) continue;
         if (c.v > bv) {
           bv = c.v;
           fastest = c;
@@ -451,7 +536,8 @@ class UnderSheet implements GameInstance {
     // Re-hook: send the lump across the middle once, with a squeak.
     if (this.idleT > 11) {
       this.idleT = rand(6, 3);
-      const c = this.critters[randInt(this.critters.length)];
+      const live = this.critters.filter((x) => !x.caught);
+      const c = live[randInt(live.length)];
       if (c) {
         c.state = "flee";
         c.stateT = 0;
@@ -462,10 +548,22 @@ class UnderSheet implements GameInstance {
       }
     }
 
-    // After a good run, send in something bigger.
-    if (this.streak >= 4 && this.critters.length < 3) {
-      this.streak = 0;
-      this.spawn(true);
+    // Clear finished captures, then let the sheet sit empty for a beat before
+    // the next one arrives. The pause is what makes a catch feel like it
+    // actually ended something.
+    const before = this.critters.length;
+    this.critters = this.critters.filter((c) => !c.dead);
+    if (this.critters.length < before) this.respawnT = rand(2.4, 1.2);
+
+    if (this.respawnT > 0) {
+      this.respawnT -= dt;
+      if (this.respawnT <= 0) {
+        // After a good run, what comes back is bigger.
+        this.spawn(this.streak >= 3 && chance(0.4));
+        if (this.streak >= 3) this.streak = 0;
+      }
+    } else if (this.critters.filter((c) => !c.caught).length < this.population()) {
+      this.respawnT = rand(2.2, 1.0);
     }
   }
 
@@ -476,16 +574,18 @@ class UnderSheet implements GameInstance {
       rx: c.size * 1.25,
       ry: c.size * 0.85,
       a: c.a,
-      // A stunned critter bunches up under the sheet and pushes higher.
-      amp: c.lift * (1 + c.stun * 0.7),
+      amp: c.domeAmp,
     }));
   }
 
   render(g: CanvasRenderingContext2D) {
     this.cloth.render(g, this.domes());
 
-    // Tails ride on top of the sheet.
+    // Tails ride on top of the sheet, and so does anything we've uncovered.
     for (const c of this.critters) this.drawTail(g, c);
+    for (const c of this.critters) {
+      if (c.revealAlpha > 0.01) this.drawRevealed(g, c);
+    }
 
     // Paw press feedback.
     for (const p of this.presses) {
@@ -497,6 +597,112 @@ class UnderSheet implements GameInstance {
       g.arc(p.x, p.y, p.r * (0.6 + t * 1.6), 0, TAU);
       g.stroke();
     }
+    g.globalAlpha = 1;
+  }
+
+  /**
+   * The payoff. For the whole hunt the cat only ever sees a lump, so actually
+   * uncovering the animal is the reward — and because its proportions and
+   * colour are generated per critter, it's a different one every time.
+   */
+  private drawRevealed(g: CanvasRenderingContext2D, c: Critter) {
+    const alpha = c.revealAlpha;
+    const st = c.struggle;
+    const L = c.size * 1.15;
+    const W = c.size * 0.78 * c.plump;
+    const body = `hsl(${c.hue} 42% 66%)`;
+    const dark = `hsl(${c.hue} 38% 40%)`;
+    const belly = `hsl(${c.hue} 35% 82%)`;
+
+    g.save();
+    g.globalAlpha = alpha;
+    g.translate(c.x, c.y);
+    // Thrashing while it still has fight in it, then it goes limp.
+    g.rotate(c.a + Math.sin(c.revealT * 21) * 0.26 * st);
+    // A slump as the struggle dies out.
+    g.scale(1, 1 - (1 - st) * 0.12);
+
+    // Shadow on the cloth.
+    g.save();
+    g.translate(4, 7);
+    g.fillStyle = "rgba(0,0,0,0.42)";
+    g.filter = "blur(6px)";
+    g.beginPath();
+    g.ellipse(0, 0, L * 0.55, W * 0.5, 0, 0, TAU);
+    g.fill();
+    g.restore();
+
+    // Legs, kicking in opposed pairs while it fights.
+    g.strokeStyle = dark;
+    g.lineCap = "round";
+    g.lineWidth = Math.max(2, c.size * 0.075);
+    for (let i = 0; i < 4; i++) {
+      const fore = i < 2 ? 1 : -1;
+      const side = i % 2 === 0 ? 1 : -1;
+      const kick = Math.sin(c.revealT * 24 + i * 1.9) * 0.5 * st;
+      const bx = fore * L * 0.26;
+      const by = side * W * 0.36;
+      g.beginPath();
+      g.moveTo(bx, by);
+      g.lineTo(
+        bx + fore * L * 0.2 + kick * 10,
+        by + side * (W * 0.42 + Math.abs(kick) * 12),
+      );
+      g.stroke();
+    }
+
+    // Body, then a lighter belly to give it some roundness.
+    const grad = g.createLinearGradient(0, -W * 0.6, 0, W * 0.6);
+    grad.addColorStop(0, belly);
+    grad.addColorStop(0.5, body);
+    grad.addColorStop(1, dark);
+    g.fillStyle = grad;
+    g.beginPath();
+    g.ellipse(-L * 0.08, 0, L * 0.52, W * 0.5, 0, 0, TAU);
+    g.fill();
+
+    // Head and snout.
+    const hx = L * 0.42;
+    g.fillStyle = body;
+    g.beginPath();
+    g.ellipse(hx, 0, L * 0.2 * c.snout, W * 0.32, 0, 0, TAU);
+    g.fill();
+    g.fillStyle = dark;
+    g.beginPath();
+    g.arc(hx + L * 0.19 * c.snout, 0, Math.max(1.5, c.size * 0.045), 0, TAU);
+    g.fill();
+
+    // Ears — the silhouette detail that makes it read as a small mammal.
+    const er = W * 0.24 * c.earScale;
+    for (const side of [-1, 1]) {
+      const ex = hx - L * 0.16;
+      const ey = side * (W * 0.34 + er * 0.5);
+      g.fillStyle = dark;
+      g.beginPath();
+      g.ellipse(ex, ey, er, er * 0.88, side * 0.4, 0, TAU);
+      g.fill();
+      g.fillStyle = belly;
+      g.beginPath();
+      g.ellipse(ex, ey, er * 0.5, er * 0.44, side * 0.4, 0, TAU);
+      g.fill();
+    }
+
+    // Eye. Open while struggling, closed once it goes still.
+    g.fillStyle = "rgba(20,20,24,0.9)";
+    if (st > 0.25) {
+      g.beginPath();
+      g.arc(hx, -W * 0.12, Math.max(1.6, c.size * 0.05), 0, TAU);
+      g.fill();
+    } else {
+      g.strokeStyle = "rgba(20,20,24,0.75)";
+      g.lineWidth = Math.max(1.4, c.size * 0.032);
+      g.beginPath();
+      g.moveTo(hx - c.size * 0.05, -W * 0.12);
+      g.lineTo(hx + c.size * 0.05, -W * 0.12);
+      g.stroke();
+    }
+
+    g.restore();
     g.globalAlpha = 1;
   }
 
@@ -555,7 +761,7 @@ export const underSheet: GameModule = {
   id: "under-sheet",
   title: "Under the Sheet",
   tagline:
-    "Something is moving under the blanket, and its tail is still sticking out. Real cloth physics — press it and it dents.",
+    "Something is moving under the blanket, and its tail is still sticking out. Pin it and the sheet slides off — the only way to see what it was.",
   suits: ["watcher", "pouncer"],
   backdrop: "#141824",
   accent: "#8fc7ff",
