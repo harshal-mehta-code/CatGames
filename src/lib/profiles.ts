@@ -36,8 +36,10 @@ export function loadProfiles(): CatProfile[] {
   try {
     const raw = localStorage.getItem(KEY);
     const parsed = raw ? (JSON.parse(raw) as CatProfile[]) : null;
-    profileCache =
-      Array.isArray(parsed) && parsed.length ? parsed : DEFAULT_PROFILES;
+    // An empty saved list is honoured: Mason and Muffin are only a starting
+    // point, and someone who deletes them to add their own cats shouldn't have
+    // ours reappear on the next visit.
+    profileCache = Array.isArray(parsed) ? parsed : DEFAULT_PROFILES;
   } catch {
     profileCache = DEFAULT_PROFILES;
   }
@@ -74,6 +76,55 @@ export function setActiveId(id: string) {
 
 export const serverProfiles = () => DEFAULT_PROFILES;
 export const serverActiveId = () => DEFAULT_PROFILES[0].id;
+
+/**
+ * Hues offered when adding a cat. Restricted to the blue-violet and
+ * amber/yellow-green bands — the two a dichromat cat actually resolves — so a
+ * profile colour stays meaningful if we ever tint prey with it.
+ */
+export const PROFILE_HUES = [28, 38, 52, 74, 92, 186, 205, 224, 246];
+
+const slugify = (name: string) =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "") || "cat";
+
+/** Add a cat. Returns the created profile, with a guaranteed-unique id. */
+export function addProfile(
+  name: string,
+  style: PlayStyle,
+  hue: number,
+): CatProfile {
+  const all = loadProfiles();
+  const base = slugify(name);
+  let id = base;
+  let n = 2;
+  while (all.some((p) => p.id === id)) id = `${base}-${n++}`;
+  // New cats start mid-band; the hunt tunes itself from their hit rate.
+  const p: CatProfile = { id, name: name.trim(), hue, style, skill: 0.5 };
+  saveProfiles([...all, p]);
+  setActiveId(p.id);
+  return p;
+}
+
+export function updateProfile(id: string, patch: Partial<CatProfile>) {
+  saveProfiles(
+    loadProfiles().map((p) => (p.id === id ? { ...p, ...patch, id } : p)),
+  );
+}
+
+/**
+ * Remove a cat. If they were the one selected, fall back to whoever is left —
+ * an active id pointing at a deleted cat would leave the launcher with nothing
+ * selected.
+ */
+export function removeProfile(id: string) {
+  const rest = loadProfiles().filter((p) => p.id !== id);
+  saveProfiles(rest);
+  if (getActiveId() === id && rest.length) setActiveId(rest[0].id);
+  else emit();
+}
 
 /**
  * Nudge a cat's skill toward the observed hit rate. We target ~45% success:

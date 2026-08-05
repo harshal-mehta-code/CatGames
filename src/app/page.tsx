@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { GAMES } from "@/lib/registry";
-import { setActiveId } from "@/lib/profiles";
+import CatManager from "@/components/CatManager";
 import { useActiveProfile } from "@/lib/useProfiles";
 
 export default function Home() {
-  const { profiles, activeId: active, profile: current } = useActiveProfile();
-  const choose = (id: string) => setActiveId(id);
+  const { profile: current } = useActiveProfile();
+  const ready = !!current;
 
   return (
     <main className="min-h-dvh flex-1 bg-[#07090d] px-6 py-12 text-white">
@@ -21,34 +21,13 @@ export default function Home() {
           </h1>
         </header>
 
-        <div className="mt-6 flex flex-wrap gap-3">
-          {profiles.map((p) => {
-            const on = p.id === active;
-            return (
-              <button
-                key={p.id}
-                onClick={() => choose(p.id)}
-                className={`rounded-2xl border px-5 py-4 text-left transition ${
-                  on
-                    ? "border-white/40 bg-white/10"
-                    : "border-white/10 bg-white/[0.03] hover:bg-white/[0.06]"
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <span
-                    className="h-3 w-3 rounded-full"
-                    style={{ background: `hsl(${p.hue} 80% 60%)` }}
-                  />
-                  <span className="text-lg font-medium">{p.name}</span>
-                </div>
-                <div className="mt-1 text-xs capitalize text-white/40">
-                  {p.style} · difficulty {Math.round(p.skill * 100)}%
-                </div>
-              </button>
-            );
-          })}
-        </div>
+        <CatManager />
 
+        {/* Every hunt is tuned to a specific cat's play style and skill, so
+            there's nothing sensible to launch until there's a cat to launch
+            it for. */}
+        {!ready ? null : (
+        <>
         {/* The shuffle leads, because rotation is what keeps any of this
             working past the second week. A single game played daily stops
             being prey once the cat can predict it. */}
@@ -105,6 +84,8 @@ export default function Home() {
             })}
           </div>
         </section>
+        </>
+        )}
 
         <footer className="mt-16 space-y-2 border-t border-white/10 pt-6 text-xs leading-relaxed text-white/30">
           <p>

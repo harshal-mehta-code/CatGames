@@ -1,13 +1,15 @@
 "use client";
 
 import { useMemo } from "react";
+import Link from "next/link";
 import GamePlayer, { SESSION_SECONDS } from "@/components/GamePlayer";
 import { getGame } from "@/lib/registry";
 import { buildShuffle } from "@/lib/shuffle";
-import { useActiveProfile } from "@/lib/useProfiles";
+import { useActiveProfile, useHydrated } from "@/lib/useProfiles";
 
 export default function PlayClient({ id }: { id: string }) {
   const { profile } = useActiveProfile();
+  const hydrated = useHydrated();
   const shuffled = id === "shuffle";
   const mod = shuffled ? null : getGame(id);
 
@@ -17,13 +19,37 @@ export default function PlayClient({ id }: { id: string }) {
   // the rotation for a genuinely different hunt each visit.
   const plan = useMemo(
     () =>
-      shuffled
-        ? buildShuffle(profile, SESSION_SECONDS)
-        : mod
-          ? [{ game: mod, seconds: SESSION_SECONDS }]
-          : [],
-    [shuffled, mod, profile],
+      !profile || !hydrated
+        ? []
+        : shuffled
+          ? buildShuffle(profile, SESSION_SECONDS)
+          : mod
+            ? [{ game: mod, seconds: SESSION_SECONDS }]
+            : [],
+    [shuffled, mod, profile, hydrated],
   );
+
+  // The shuffle picks its rotation randomly, so it can't be generated until
+  // after hydration — see useHydrated.
+  if (!hydrated) {
+    return <main className="min-h-dvh flex-1 bg-[#07090d]" />;
+  }
+
+  // Every hunt is tuned to a specific cat, so there's nothing to run without
+  // one — reachable if someone deletes all their profiles mid-session.
+  if (!profile) {
+    return (
+      <main className="grid min-h-dvh flex-1 place-items-center bg-[#07090d] px-6 text-center text-white/60">
+        <p>
+          Add a cat on the{" "}
+          <Link href="/" className="underline underline-offset-4">
+            home screen
+          </Link>{" "}
+          to start a hunt.
+        </p>
+      </main>
+    );
+  }
 
   if (!plan.length) {
     return (
