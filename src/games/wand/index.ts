@@ -3,6 +3,8 @@ import { styleTuning } from "@/lib/profiles";
 import { rand, randInt, pick, chance, clamp, TAU, damp } from "@/lib/rng";
 import * as sfx from "@/lib/audio";
 import { Rope } from "./rope";
+import { PawField } from "@/lib/paw";
+import { Drift } from "@/lib/tempo";
 
 /**
  * The Wand.
@@ -59,7 +61,7 @@ function makeToy(): Toy {
     hue2: hue > 150 ? rand(60, 38) : rand(230, 200),
     sat: rand(80, 45),
     light: rand(80, 58),
-    size: rand(30, 20) * (kind === "pom" ? 1.15 : 1),
+    size: rand(52, 38) * (kind === "pom" ? 1.15 : 1),
     barbs: randInt(20, 12),
     barbLen: rand(1.5, 0.85),
     streamers: Array.from({ length: randInt(5, 3) }, () => ({
@@ -135,7 +137,16 @@ class Wand implements GameInstance {
   private timeScale = 1;
   /** Where the cat last touched — prey flees from here. */
   private lastPaw: { x: number; y: number } | null = null;
-  private pointers = new Map<number, { x: number; y: number; r: number }>();
+  /** Every touch scuffs the floor, whether or not it catches anything. */
+  private field = new PawField({
+    ring: "200,210,230",
+    bloom: "150,165,195",
+    hue: [30, 210],
+    grit: 9,
+    spread: 0.7,
+  });
+  /** Wanders the toy's pace so no phase runs at a constant speed. */
+  private drift = new Drift(0.7, 1.5);
 
   constructor(host: GameHost) {
     this.host = host;
@@ -310,13 +321,7 @@ class Wand implements GameInstance {
     const pan = (e.x / this.w) * 2 - 1;
     this.lastPaw = { x: e.x, y: e.y };
 
-    const reach = Math.max(e.r, 30) + 8;
-    if (e.phase === "up") {
-      this.pointers.delete(e.id);
-      return;
-    }
-    this.pointers.set(e.id, { x: e.x, y: e.y, r: reach });
-
+    const reach = this.field.paw(e);
     if (e.phase !== "down") return;
     this.host.report({ type: "engage" });
     sfx.thump(pan, 0.6 + e.force * 0.6);
@@ -332,6 +337,7 @@ class Wand implements GameInstance {
       sfx.crunch(pan);
       sfx.squeak(pan, false);
       this.timeScale = 0.42;
+      this.field.strike(tip.x, tip.y, reach, 1.2);
       this.caughtT = 0;
       this.setPhase("caught");
       return;
@@ -351,6 +357,8 @@ class Wand implements GameInstance {
   }
 
   update(dt: number) {
+    this.field.update(dt);
+    this.drift.update(dt);
     this.timeScale = damp(this.timeScale, 1, 0.2, dt);
     const sdt = Math.min(dt * this.timeScale, 0.05);
     this.t += sdt;
@@ -395,14 +403,16 @@ class Wand implements GameInstance {
       sdt,
       { x: this.anchor.x + jx, y: this.anchor.y + jy },
       { x: this.goal.x + jx, y: this.goal.y + jy },
-      this.toyV,
+      // Drift keeps the pace wandering inside every phase, so even a long
+      // sweep never travels at one steady speed.
+      this.toyV * this.drift.value,
       this.w,
       this.h,
     );
 
     // A paw resting on the string keeps deflecting it, so a cat can pin and
     // drag the line, not just strike it.
-    for (const p of this.pointers.values())
+    for (const p of this.field.threats)
       this.rope.push(p.x, p.y, p.r * 1.3, 0.55);
 
     // --- Audio -------------------------------------------------------------
@@ -588,6 +598,7 @@ class Wand implements GameInstance {
     }
 
     this.drawToy(g);
+    this.field.render(g);
   }
 }
 

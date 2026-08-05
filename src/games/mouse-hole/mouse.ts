@@ -46,12 +46,13 @@ export class Mouse {
   hue = chance(0.55) ? rand(44, 26) : rand(226, 202);
   sat = rand(58, 26);
   light = rand(82, 62);
-  size = rand(26, 20);
+  // Sized to stay visible around a paw pad, which covers ~76px of glass.
+  size = rand(38, 30);
   earScale = rand(1.35, 0.7);
   plump = rand(1.18, 0.86);
   tailLen = rand(1.5, 0.95);
   /** Base speed in px/s. */
-  cruise = rand(240, 155);
+  cruise = rand(265, 140);
   /** How long it will sit in a hole mouth before committing. */
   nerve = rand(1.7, 0.6);
   /** Probability of fully leaving the hole rather than ducking back under. */

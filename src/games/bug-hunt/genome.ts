@@ -63,7 +63,10 @@ function catHue() {
 const PLANS: BodyPlan[] = ["beetle", "roach", "spider", "cricket", "firefly"];
 
 export function makeGenome(plan: BodyPlan = pick(PLANS)): Genome {
-  const size = rand(1.7, 1.15);
+  // A paw pad covers ~76px of glass. Prey smaller than that vanishes under the
+  // paw at the exact moment the cat commits, so the strike has no visible
+  // consequence — which is most of why these bugs got watched rather than hit.
+  const size = rand(2.7, 1.9);
   const hue = catHue();
 
   const base: Genome = {
@@ -96,7 +99,9 @@ export function makeGenome(plan: BodyPlan = pick(PLANS)): Genome {
     freezeBias: rand(1.4, 0.6),
     cadence: rand(9, 5),
     glow: 0,
-    shy: rand(0.8, 0.15),
+    // Bugs use cover much more readily now: fully vanishing under a leaf and
+    // re-emerging is a far stronger draw than staying visible the whole time.
+    shy: rand(0.95, 0.4),
   };
 
   switch (plan) {

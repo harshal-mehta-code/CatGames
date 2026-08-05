@@ -283,8 +283,11 @@ export function drawFish(g: CanvasRenderingContext2D, f: Fish, t: number) {
   const gm = f.g;
   // Perspective: deeper is smaller and much dimmer, since the point is that
   // surfacing is what makes a fish worth swatting at.
-  const scale = 1 - z * 0.3;
-  const alpha = (f.caught ? f.fade : 1) * (1 - z * 0.62);
+  const scale = 1 - z * 0.42;
+  // Deep fish fade almost out. Concealment has to be real for a surfacing to
+  // register as an emergence rather than as a fish getting slightly brighter —
+  // and something appearing from nowhere is the strongest trigger there is.
+  const alpha = (f.caught ? f.fade : 1) * (1 - z * 0.8);
   const L = gm.len * scale;
   // Half-width. Girth is a fraction of length, so this has to be halved again
   // or the body comes out about 1.5:1 — a blob, not a fish.

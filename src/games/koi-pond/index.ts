@@ -2,6 +2,8 @@ import type { GameModule, GameHost, GameInstance, PawEvent } from "@/lib/types";
 import { styleTuning } from "@/lib/profiles";
 import { rand, randInt, chance, clamp, TAU, damp } from "@/lib/rng";
 import * as sfx from "@/lib/audio";
+import { PawField } from "@/lib/paw";
+import { Tempo } from "@/lib/tempo";
 import { Fish, drawFish, makeGenome, type Genome, type PondWorld } from "./fish";
 import {
   PONDS,
@@ -39,8 +41,16 @@ class KoiPond implements GameInstance {
   private species: Genome[] = [];
   private ripples: Ripple[] = [];
   private splashes: Splash[] = [];
-  private threats: { x: number; y: number; r: number }[] = [];
-  private pointers = new Map<number, { x: number; y: number }>();
+  /** Every touch displaces water, hit or miss. */
+  private field = new PawField({
+    ring: "205,240,255",
+    bloom: "150,200,230",
+    hue: [180, 210],
+    grit: 12,
+    // Water carries a disturbance much further than soil does.
+    spread: 1.5,
+  });
+  private tempo = new Tempo();
 
   private t = 0;
   private idleT = 0;
@@ -59,9 +69,9 @@ class KoiPond implements GameInstance {
     const t = styleTuning(this.host.profile.style);
     const skill = this.host.profile.skill;
     return {
-      speedScale: t.speed * (0.72 + skill * 0.6),
+      speedScale: t.speed * (0.72 + skill * 0.6) * this.tempo.speed,
       // A less skilled cat gets fish that linger at the surface much longer.
-      surfaceScale: t.freeze * (1.45 - skill * 0.55),
+      surfaceScale: t.freeze * (1.45 - skill * 0.55) * this.tempo.freeze,
       fleeRadius: t.fleeRadius * (0.55 + skill * 0.75),
       density: t.density,
     };
@@ -72,7 +82,7 @@ class KoiPond implements GameInstance {
     return {
       w: this.w,
       h: this.h,
-      threats: this.threats,
+      threats: this.field.threats,
       pads: this.pads,
       speedScale: t.speedScale,
       surfaceScale: t.surfaceScale,
@@ -146,26 +156,11 @@ class KoiPond implements GameInstance {
     this.idleT = 0;
     const pan = (e.x / this.w) * 2 - 1;
 
-    if (e.phase === "up") this.pointers.delete(e.id);
-    else this.pointers.set(e.id, { x: e.x, y: e.y });
-    this.threats = [...this.pointers.values()].map((p) => ({
-      x: p.x,
-      y: p.y,
-      r: 26,
-    }));
+    const reach = this.field.paw(e);
     if (e.phase !== "down") return;
 
-    const reach = Math.max(e.r, 30) + 8;
     this.host.report({ type: "engage" });
     sfx.thump(pan, 0.5 + e.force * 0.5);
-    this.ripples.push({
-      x: e.x,
-      y: e.y,
-      r: reach * 0.5,
-      t: 0,
-      life: 1.15,
-      strength: 0.6 + e.force * 0.6,
-    });
     this.splash(e.x, e.y, 7, 0.6);
 
     // --- A fish at the surface: a real catch -------------------------------
@@ -224,6 +219,8 @@ class KoiPond implements GameInstance {
   }
 
   update(dt: number) {
+    this.tempo.update(dt);
+    this.field.update(dt);
     this.timeScale = damp(this.timeScale, 1, 0.2, dt);
     const sdt = Math.min(dt * this.timeScale, 0.05);
     this.t += sdt;
@@ -245,6 +242,19 @@ class KoiPond implements GameInstance {
           strength: 0.32,
         });
       }
+    }
+
+    // A spook wave with no cause the cat can see: the whole shoal bolts and
+    // then settles. Something happening without being provoked is what stops
+    // the pond feeling like a loop.
+    if (this.tempo.takeBurst() && this.fish.length) {
+      const fx = rand(this.w);
+      const fy = rand(this.h);
+      for (const f of this.fish) {
+        if (f.caught) continue;
+        f.scatter(fx, fy, Math.hypot(f.x - fx, f.y - fy) < 380);
+      }
+      this.ripples.push({ x: fx, y: fy, r: 26, t: 0, life: 1.8, strength: 0.5 });
     }
 
     this.fish = this.fish.filter((f) => f.state !== "gone");
@@ -328,6 +338,7 @@ class KoiPond implements GameInstance {
     for (const p of this.pads) drawPad(g, p, this.t);
 
     for (const r of this.ripples) drawRipple(g, r);
+    this.field.render(g);
 
     for (const s of this.splashes) {
       const a = 1 - s.t / s.life;

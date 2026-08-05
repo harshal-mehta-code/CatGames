@@ -2,6 +2,8 @@ import type { GameModule, GameHost, GameInstance, PawEvent } from "@/lib/types";
 import { styleTuning } from "@/lib/profiles";
 import { rand, randInt, chance, clamp, TAU, damp } from "@/lib/rng";
 import * as sfx from "@/lib/audio";
+import { PawField } from "@/lib/paw";
+import { Tempo } from "@/lib/tempo";
 import {
   GROUNDS,
   drawHole,
@@ -24,14 +26,6 @@ interface Dirt {
   life: number;
 }
 
-interface Ring {
-  x: number;
-  y: number;
-  r: number;
-  t: number;
-  hit: boolean;
-}
-
 class MouseHole implements GameInstance {
   private host: GameHost;
   private w: number;
@@ -41,9 +35,15 @@ class MouseHole implements GameInstance {
   private baked: HTMLCanvasElement | null = null;
   private mice: Mouse[] = [];
   private dirt: Dirt[] = [];
-  private rings: Ring[] = [];
-  private threats: { x: number; y: number; r: number }[] = [];
-  private pointers = new Map<number, { x: number; y: number }>();
+  /** Every touch throws up soil, landed or not. */
+  private field = new PawField({
+    ring: "168,146,110",
+    bloom: "120,102,74",
+    hue: [28, 54],
+    grit: 15,
+    spread: 0.8,
+  });
+  private tempo = new Tempo();
 
   private t = 0;
   private idleT = 0;
@@ -77,9 +77,9 @@ class MouseHole implements GameInstance {
     const t = styleTuning(this.host.profile.style);
     const skill = this.host.profile.skill;
     return {
-      speedScale: t.speed * (0.7 + skill * 0.6),
+      speedScale: t.speed * (0.7 + skill * 0.6) * this.tempo.speed,
       // A less skilled cat gets longer, more tempting holds in the hole mouth.
-      freezeScale: t.freeze * (1.4 - skill * 0.55),
+      freezeScale: t.freeze * (1.4 - skill * 0.55) * this.tempo.freeze,
       // And sees the mouse commit to the open more often, where it's easiest.
       boldScale: clamp(1.5 - skill * 0.7, 0.6, 1.5) * t.peek,
       fleeRadius: t.fleeRadius * (0.55 + skill * 0.7),
@@ -90,7 +90,7 @@ class MouseHole implements GameInstance {
     const t = this.tuning;
     return {
       burrow: this.burrow,
-      threats: this.threats,
+      threats: this.field.threats,
       speedScale: t.speedScale,
       freezeScale: t.freezeScale,
       boldScale: t.boldScale,
@@ -139,21 +139,8 @@ class MouseHole implements GameInstance {
     this.idleT = 0;
     const pan = (e.x / this.w) * 2 - 1;
 
-    if (e.phase === "up") {
-      this.pointers.delete(e.id);
-    } else {
-      this.pointers.set(e.id, { x: e.x, y: e.y });
-    }
-    this.threats = [...this.pointers.values()].map((p) => ({
-      x: p.x,
-      y: p.y,
-      r: 26,
-    }));
+    const reach = this.field.paw(e);
     if (e.phase !== "down") return;
-
-    // A paw pad covers a lot of glass. Be generous — being stingy here is what
-    // makes these games feel unfair to an animal that cannot aim at pixels.
-    const reach = Math.max(e.r, 30) + 8;
     this.host.report({ type: "engage" });
     sfx.thump(pan, 0.6 + e.force * 0.6);
 
@@ -179,13 +166,12 @@ class MouseHole implements GameInstance {
         sfx.squeak(pan, false);
         this.timeScale = 0.4;
         this.burst(target.x, target.y, 18, 1.2);
-        this.rings.push({ x: e.x, y: e.y, r: reach, t: 0, hit: true });
+        this.field.strike(target.x, target.y, reach, 1.2);
       }
       return;
     }
 
     this.streak = 0;
-    this.rings.push({ x: e.x, y: e.y, r: reach, t: 0, hit: false });
     this.host.report({ type: "miss" });
     let reacted = false;
 
@@ -243,6 +229,8 @@ class MouseHole implements GameInstance {
   }
 
   update(dt: number) {
+    this.tempo.update(dt);
+    this.field.update(dt);
     this.timeScale = damp(this.timeScale, 1, 0.18, dt);
     const sdt = Math.min(dt * this.timeScale, 0.05);
     this.t += sdt;
@@ -268,6 +256,15 @@ class MouseHole implements GameInstance {
         });
       }
     }
+    // An unheralded scramble: the whole burrow moves at once.
+    if (this.tempo.takeBurst()) {
+      for (const m of this.mice) {
+        if (m.caught) continue;
+        m.flush(world);
+      }
+      if (sfx.audioReady()) sfx.rustle(rand(1, -1), 0.9);
+    }
+
     this.mice = this.mice.filter((m) => m.state !== "gone");
 
     // Repopulate on a pause, so a catch reads as having ended something.
@@ -320,8 +317,6 @@ class MouseHole implements GameInstance {
     }
     this.dirt = this.dirt.filter((p) => p.t < p.life);
 
-    for (const r of this.rings) r.t += dt;
-    this.rings = this.rings.filter((r) => r.t < 0.5);
   }
 
   /**
@@ -400,16 +395,7 @@ class MouseHole implements GameInstance {
       }
     }
 
-    for (const r of this.rings) {
-      const t = r.t / 0.5;
-      g.globalAlpha = (1 - t) * 0.75;
-      g.strokeStyle = r.hit ? "#ffd479" : "rgba(190,215,255,0.8)";
-      g.lineWidth = r.hit ? 4 : 2;
-      g.beginPath();
-      g.arc(r.x, r.y, r.r * (0.55 + t * 1.5), 0, TAU);
-      g.stroke();
-    }
-    g.globalAlpha = 1;
+    this.field.render(g);
 
     for (const p of this.dirt) {
       const a = 1 - p.t / p.life;

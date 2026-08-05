@@ -2,6 +2,8 @@ import type { GameModule, GameHost, GameInstance, PawEvent } from "@/lib/types";
 import { styleTuning } from "@/lib/profiles";
 import { rand, randInt, chance, clamp, TAU, damp } from "@/lib/rng";
 import * as sfx from "@/lib/audio";
+import { PawField } from "@/lib/paw";
+import { Tempo } from "@/lib/tempo";
 import { Bug, type Cover, type BugWorld } from "./bug";
 import { makeSpeciesSet, type Genome } from "./genome";
 import {
@@ -34,14 +36,6 @@ interface Particle {
   hue: number;
 }
 
-interface Ring {
-  x: number;
-  y: number;
-  r: number;
-  t: number;
-  hit: boolean;
-}
-
 const MIN_BUGS = 2;
 
 class BugHunt implements GameInstance {
@@ -54,10 +48,16 @@ class BugHunt implements GameInstance {
   private bugs: Bug[] = [];
   private splats: Splat[] = [];
   private particles: Particle[] = [];
-  private rings: Ring[] = [];
   private species: { common: Genome[]; rare: Genome };
-  private threats: { x: number; y: number; r: number }[] = [];
-  private pointers = new Map<number, { x: number; y: number }>();
+  /** Shared disturbance layer: every touch kicks up dust, hit or miss. */
+  private field = new PawField({
+    ring: "226,212,178",
+    bloom: "160,145,110",
+    hue: [34, 62],
+    grit: 18,
+    spread: 0.85,
+  });
+  private tempo = new Tempo();
 
   private skitterTimer = 0;
   private idleT = 0;
@@ -83,8 +83,10 @@ class BugHunt implements GameInstance {
     // Skill scales prey difficulty, but only within a band — we never want a
     // hunt that has become genuinely uncatchable.
     return {
-      speedScale: t.speed * (0.72 + skill * 0.62),
-      freezeScale: t.freeze * (1.35 - skill * 0.5),
+      // Tempo swings the whole swarm between quiet and frantic, so no single
+      // pace holds long enough to become predictable.
+      speedScale: t.speed * (0.72 + skill * 0.62) * this.tempo.speed,
+      freezeScale: t.freeze * (1.35 - skill * 0.5) * this.tempo.freeze,
       fleeRadius: t.fleeRadius * (0.6 + skill * 0.7),
       peekScale: t.peek,
       density: t.density,
@@ -97,7 +99,7 @@ class BugHunt implements GameInstance {
       w: this.w,
       h: this.h,
       cover: this.cover,
-      threats: this.threats,
+      threats: this.field.threats,
       speedScale: t.speedScale,
       freezeScale: t.freezeScale,
       fleeRadius: t.fleeRadius,
@@ -167,30 +169,11 @@ class BugHunt implements GameInstance {
   paw(e: PawEvent) {
     this.idleT = 0;
     const pan = (e.x / this.w) * 2 - 1;
-
-    if (e.phase === "up") {
-      this.pointers.delete(e.id);
-      this.threats = [...this.pointers.values()].map((p) => ({
-        x: p.x,
-        y: p.y,
-        r: 26,
-      }));
-      return;
-    }
-
-    this.pointers.set(e.id, { x: e.x, y: e.y });
-    this.threats = [...this.pointers.values()].map((p) => ({
-      x: p.x,
-      y: p.y,
-      r: 26,
-    }));
-
+    // Every contact disturbs the ground, whether or not it lands. A miss that
+    // does nothing is the reason a cat stops bothering.
+    const reach = this.field.paw(e);
     if (e.phase !== "down") return;
 
-    // A real paw pad covers a lot of glass. Use the reported contact radius
-    // where iPadOS gives us one, with a generous floor — being stingy here is
-    // what makes these games feel unfair to an animal that can't aim at pixels.
-    const reach = Math.max(e.r, 30) + 8;
     this.host.report({ type: "engage" });
     this.attempts++;
     sfx.thump(pan, 0.6 + e.force * 0.6);
@@ -211,11 +194,9 @@ class BugHunt implements GameInstance {
 
     if (caught) {
       this.onCatch(caught, pan);
-      this.rings.push({ x: e.x, y: e.y, r: reach, t: 0, hit: true });
       return;
     }
 
-    this.rings.push({ x: e.x, y: e.y, r: reach, t: 0, hit: false });
     this.streak = 0;
     this.host.report({ type: "miss" });
 
@@ -225,8 +206,8 @@ class BugHunt implements GameInstance {
     let spooked = false;
     for (const b of this.bugs) {
       const d = Math.hypot(b.x - e.x, b.y - e.y);
-      if (d < reach * 3.2) {
-        b.spook(e.x, e.y, d < reach * 1.8);
+      if (d < reach * 3.6) {
+        b.spook(e.x, e.y, d < reach * 2);
         spooked = true;
       }
     }
@@ -243,6 +224,7 @@ class BugHunt implements GameInstance {
     this.host.report({ type: "hit", value: b.rare ? 3 : 1 });
     sfx.crunch(pan);
     sfx.squeak(pan, false);
+    this.field.strike(b.x, b.y, b.radius * 1.6, 1.15);
     // Brief slow-motion so the catch is legible rather than instantaneous.
     this.timeScale = b.rare ? 0.25 : 0.45;
 
@@ -277,6 +259,8 @@ class BugHunt implements GameInstance {
   }
 
   update(dt: number) {
+    this.tempo.update(dt);
+    this.field.update(dt);
     // Ease back out of the catch slow-motion.
     this.timeScale = damp(this.timeScale, 1, 0.18, dt);
     const sdt = Math.min(dt * this.timeScale, 0.05);
@@ -284,6 +268,23 @@ class BugHunt implements GameInstance {
 
     const world = this.world;
     for (const b of this.bugs) b.update(sdt, world);
+
+    // A burst: something spooks and the whole swarm goes at once, with no
+    // build-up. Unheralded collective movement is far harder to habituate to
+    // than any amount of per-animal randomness.
+    if (this.tempo.takeBurst() && this.bugs.length) {
+      for (const b of this.bugs) {
+        if (b.state === "dying" || b.state === "gone") continue;
+        if (chance(0.75)) {
+          b.state = "flee";
+          b.stateT = 0;
+          b.targetA = rand(TAU);
+          b.a = b.targetA;
+          b.v = b.cruise * rand(3.2, 1.9);
+        }
+      }
+      if (sfx.audioReady()) sfx.skitter(rand(1, -1), 1, 0.45);
+    }
     this.bugs = this.bugs.filter((b) => b.state !== "gone");
 
     // Repopulate on a delay so catches feel consequential rather than
@@ -344,9 +345,6 @@ class BugHunt implements GameInstance {
     }
     this.particles = this.particles.filter((p) => p.t < p.life);
 
-    for (const r of this.rings) r.t += dt;
-    this.rings = this.rings.filter((r) => r.t < 0.5);
-
     for (const s of this.splats) s.t += dt;
     this.splats = this.splats.filter((s) => s.t < 26);
     if (this.splats.length > 14) this.splats.shift();
@@ -389,23 +387,7 @@ class BugHunt implements GameInstance {
     }
     for (const b of this.bugs) if (b.depth > 0.02) drawBump(g, b);
 
-    // Paw feedback rings.
-    for (const r of this.rings) {
-      const t = r.t / 0.5;
-      g.globalAlpha = (1 - t) * 0.75;
-      g.strokeStyle = r.hit ? "#ffd479" : "rgba(190,215,255,0.85)";
-      g.lineWidth = r.hit ? 4 : 2;
-      g.beginPath();
-      g.arc(r.x, r.y, r.r * (0.55 + t * 1.5), 0, TAU);
-      g.stroke();
-      if (r.hit) {
-        g.globalAlpha = (1 - t) * 0.35;
-        g.beginPath();
-        g.arc(r.x, r.y, r.r * (0.3 + t * 0.9), 0, TAU);
-        g.stroke();
-      }
-    }
-    g.globalAlpha = 1;
+    this.field.render(g);
 
     for (const p of this.particles) {
       const a = 1 - p.t / p.life;

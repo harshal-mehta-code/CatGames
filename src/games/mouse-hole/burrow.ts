@@ -116,7 +116,7 @@ function placeHoles(w: number, h: number, count: number): Hole[] {
     // Holes are kept a little smaller than the mouse is long, so a peeking
     // animal is genuinely legible sticking out of one rather than being
     // swallowed by the mouth.
-    const r = rand(33, 24);
+    const r = rand(44, 33);
     return {
       x: clamp(cx * cw + rand(cw - r, r), margin, w - margin),
       y: clamp(cy * ch + rand(ch - r, r), margin, h - margin),
